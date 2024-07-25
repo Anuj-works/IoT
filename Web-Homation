@@ -1,1 +1,170 @@
+#ifdef ENABLE_DEBUG
+  #define DEBUG_ESP_PORT Serial
+  #define NODEBUG_WEBSOCKETS
+  #define NDEBUG
+#endif 
 
+#include <Arduino.h>
+#if defined(ESP8266)
+  #include <ESP8266WiFi.h>
+#elif defined(ESP32) 
+  #include <WiFi.h>
+#endif
+
+#include "SinricPro.h"
+#include "SinricProSwitch.h"
+#include <map>
+
+#define WIFI_SSID         ""
+#define WIFI_PASS         ""
+#define APP_KEY           ""
+#define APP_SECRET        ""
+
+
+
+#define BAUD_RATE   115200
+
+#define DEBOUNCE_TIME 250
+  
+#define RELAYPIN_1 23
+#define RELAYPIN_2 22
+#define RELAYPIN_3 21
+
+typedef struct {      
+  int relayPIN;
+  int flipSwitchPIN;
+  bool activeLow;
+} deviceConfig_t;
+
+
+std::map<String, deviceConfig_t> devices = {
+    //{deviceId, {relayPIN,  flipSwitchPIN, activeLow}}
+    {"65c43317ccc93539a13550ac", {  23, 13, true }},
+    {"65c432eab0a460b25b3ecb54", {  22, 12, true }},
+    {"65c4334bb0a460b25b3ecbba", {  21, 14, true }},
+       
+};
+
+typedef struct {      
+  String deviceId;
+  bool lastFlipSwitchState;
+  unsigned long lastFlipSwitchChange;
+  bool activeLow;
+} flipSwitchConfig_t;
+
+std::map<int, flipSwitchConfig_t> flipSwitches;   
+
+void setupRelays() { 
+  for (auto &device : devices) {           
+    int relayPIN = device.second.relayPIN; 
+    pinMode(relayPIN, OUTPUT);             
+    digitalWrite(relayPIN, HIGH);
+  }
+}
+
+void setupFlipSwitches() {
+  for (auto &device : devices)  {                     
+    flipSwitchConfig_t flipSwitchConfig;              
+
+    flipSwitchConfig.deviceId = device.first;         
+    flipSwitchConfig.lastFlipSwitchChange = 0;        
+    flipSwitchConfig.lastFlipSwitchState = false;     
+    int flipSwitchPIN = device.second.flipSwitchPIN;  
+    bool activeLow = device.second.activeLow;         
+    flipSwitchConfig.activeLow = activeLow;           
+    flipSwitches[flipSwitchPIN] = flipSwitchConfig;   
+    
+    if(activeLow) {
+      pinMode(flipSwitchPIN, INPUT_PULLUP);           
+    }
+    else {
+      pinMode(flipSwitchPIN, INPUT);                  
+    } 
+  }
+}
+
+bool onPowerState(String deviceId, bool &state) {
+  Serial.printf("%s: %s\r\n", deviceId.c_str(), !state ? "on" : "off");
+  int relayPIN = devices[deviceId].relayPIN; 
+  digitalWrite(relayPIN, !state);             
+  return true;
+}
+
+void handleFlipSwitches() {
+  unsigned long actualMillis = millis();                                          
+  for (auto &flipSwitch : flipSwitches) {                                         
+    unsigned long lastFlipSwitchChange = flipSwitch.second.lastFlipSwitchChange;  
+
+    if (actualMillis - lastFlipSwitchChange > DEBOUNCE_TIME) {                    
+      int flipSwitchPIN = flipSwitch.first;                                       
+      bool lastFlipSwitchState = flipSwitch.second.lastFlipSwitchState;           
+      bool activeLow = flipSwitch.second.activeLow; 
+      bool flipSwitchState = digitalRead(flipSwitchPIN);                         
+      if(activeLow) flipSwitchState = !flipSwitchState;
+
+      if (flipSwitchState != lastFlipSwitchState) {                              
+#ifdef TACTILE_BUTTON
+        if (flipSwitchState) {                                                    
+#endif      
+          flipSwitch.second.lastFlipSwitchChange = actualMillis;                  
+          String deviceId = flipSwitch.second.deviceId;                           
+          int relayPIN = devices[deviceId].relayPIN;                              
+          bool newRelayState = !digitalRead(relayPIN);                           
+          digitalWrite(relayPIN, newRelayState);                                  
+
+          SinricProSwitch &mySwitch = SinricPro[deviceId];                        
+          mySwitch.sendPowerStateEvent(newRelayState);                            
+#ifdef TACTILE_BUTTON
+        }
+#endif      
+        flipSwitch.second.lastFlipSwitchState = flipSwitchState;                  
+      }
+    }
+  }
+}
+
+void setupWiFi() {
+  Serial.printf("\r\n[Wifi]: Connecting");
+
+  #if defined(ESP8266)
+    WiFi.setSleepMode(WIFI_NONE_SLEEP); 
+    WiFi.setAutoReconnect(true);
+  #elif defined(ESP32)
+    WiFi.setSleep(false); 
+    WiFi.setAutoReconnect(true);
+  #endif
+
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.printf(".");
+    delay(250);
+  }
+  
+  Serial.printf("connected!\r\n[WiFi]: IP-Address is %s\r\n", WiFi.localIP().toString().c_str());
+}
+
+void setupSinricPro() {
+  for (auto &device : devices) {
+    const char *deviceId = device.first.c_str();
+    SinricProSwitch &mySwitch = SinricPro[deviceId];
+    mySwitch.onPowerState(onPowerState);
+  }
+
+  
+  SinricPro.begin(APP_KEY, APP_SECRET);  
+}
+
+void setup() {
+  Serial.begin(BAUD_RATE);
+  setupRelays();
+  setupFlipSwitches();
+  setupWiFi();
+  setupSinricPro();
+}
+
+void loop() {
+  SinricPro.handle();
+  handleFlipSwitches();
+}
